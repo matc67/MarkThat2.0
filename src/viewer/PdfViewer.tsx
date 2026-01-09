@@ -3,13 +3,17 @@ import type { PageViewport } from "pdfjs-dist";
 
 import { loadPdfFromArrayBuffer, PdfDoc } from "./pdfjs";
 import SvgOverlay from "./SvgOverlay";
+import type { MarkAction, MarkState } from "../app/markTypes";
 
 type Props = {
   file?: File;
   page: number;
   zoom: number;
   onMeta: (meta: { pages: number }) => void;
-  onRequestZoom: (nextZoom: number) => void; // ctrl+scroll / pinch zoom
+  onRequestZoom: (nextZoom: number) => void;
+
+  markState: MarkState;
+  dispatch: React.Dispatch<MarkAction>;
 };
 
 export default function PdfViewer({
@@ -18,34 +22,32 @@ export default function PdfViewer({
   zoom,
   onMeta,
   onRequestZoom,
+  markState,
+  dispatch,
 }: Props) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const pdfCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
 
   const [doc, setDoc] = useState<PdfDoc | null>(null);
   const [viewport, setViewport] = useState<PageViewport | null>(null);
 
-  // Ctrl + scroll (and trackpad pinch on macOS) zoom
+  // Ctrl + scroll / pinch zoom
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
 
     function onWheel(e: WheelEvent) {
       if (!e.ctrlKey) return;
-
       e.preventDefault();
-
-      // deltaY > 0 => usually zoom out
       const direction = e.deltaY > 0 ? -1 : 1;
       const step = 0.1;
-
       const next = Math.min(5, Math.max(0.25, +(zoom + direction * step).toFixed(2)));
       onRequestZoom(next);
     }
 
     el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel as any);
+    return () => el.removeEventListener("wheel", onWheel);
   }, [zoom, onRequestZoom]);
 
   // Load PDF when file changes
@@ -79,7 +81,8 @@ export default function PdfViewer({
     let cancelled = false;
 
     async function render() {
-      if (!doc || !pdfCanvasRef.current) return;
+      const canvas = pdfCanvasRef.current;
+      if (!doc || !canvas) return;
 
       const pageObj = await doc.getPage(page);
       if (cancelled) return;
@@ -87,21 +90,21 @@ export default function PdfViewer({
       const vp = pageObj.getViewport({ scale: zoom });
       setViewport(vp);
 
-      const canvas = pdfCanvasRef.current;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
       canvas.width = Math.floor(vp.width);
       canvas.height = Math.floor(vp.height);
 
-      // Keep overlay perfectly aligned (same pixel size as PDF canvas)
-      if (overlayRef.current) {
-        overlayRef.current.style.width = `${canvas.width}px`;
-        overlayRef.current.style.height = `${canvas.height}px`;
+      const overlayEl = overlayRef.current;
+      if (overlayEl) {
+        overlayEl.style.width = `${canvas.width}px`;
+        overlayEl.style.height = `${canvas.height}px`;
       }
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const task = pageObj.render({ canvasContext: ctx, viewport: vp });
+
+      const task = pageObj.render({ canvasContext: ctx, viewport: vp, canvas });
       await task.promise;
     }
 
@@ -114,24 +117,20 @@ export default function PdfViewer({
   return (
     <div ref={scrollRef} style={{ height: "100%", overflow: "auto" }}>
       {!file ? (
-        <div className="dropHint">
-          Open a PDF using the button above or drag/drop into the viewer area.
-        </div>
+        <div className="dropHint">Open a PDF using the button above or drag/drop into the viewer area.</div>
       ) : (
         <div style={{ padding: 18 }}>
           <div style={{ position: "relative", display: "inline-block" }}>
             <canvas ref={pdfCanvasRef} />
 
-            {/* Overlay container stays same size as canvas */}
-            <div
-              ref={overlayRef}
-              style={{
-                position: "absolute",
-                left: 0,
-                top: 0,
-              }}
-            >
-              <SvgOverlay viewport={viewport} containerRef={overlayRef} />
+            <div ref={overlayRef} style={{ position: "absolute", left: 0, top: 0 }}>
+              <SvgOverlay
+                viewport={viewport}
+                page={page}
+                containerRef={overlayRef}
+                markState={markState}
+                dispatch={dispatch}
+              />
             </div>
           </div>
         </div>

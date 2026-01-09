@@ -95,3 +95,79 @@ body {
   font-size: 14px;
   margin: 18px;
 }
+
+.toolGroup { display: flex; gap: 8px; margin-left: 10px; }
+.btnOn { outline: 2px solid rgba(96,165,250,0.9); }
+
+.panel {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 14px;
+  background: rgba(255,255,255,0.03);
+}
+
+.panelTitleRow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.panelTitle {
+  font-weight: 900;
+  font-size: 14px;
+}
+
+.panelSub {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.formRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.label {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.input, .select {
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.25);
+  color: rgba(255,255,255,0.92);
+  padding: 0 10px;
+  outline: none;
+}
+
+.input:focus, .select:focus {
+  border-color: rgba(96,165,250,0.6);
+}
+
+.grid3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.btnPrimary {
+  width: 100%;
+  height: 38px;
+  border-radius: 12px;
+  border: 1px solid rgba(96,165,250,0.55);
+  background: rgba(96,165,250,0.18);
+  color: rgba(255,255,255,0.95);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.btnPrimary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
