@@ -1,15 +1,23 @@
+// src/App.tsx
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import "./app/styles.css";
 
 import PdfViewer from "./viewer/PdfViewer";
-import { initialHistory, markHistoryReducer, computeAreaInUnits2, computeLengthInUnits } from "./app/markStore";
-import type { Tool, Units, ScaleCal, PdfPoint } from "./app/markTypes";
+import {
+  initialHistory,
+  markHistoryReducer,
+  computeMarkAreaInUnits,
+  computeMarkLengthInUnits,
+  computeMarkPerimeterInUnits,
+} from "./app/markStore";
+import type { Tool, Units, ScaleCal, PdfPoint, Mark } from "./app/markTypes";
+import { exportPdfWithMarks } from "./app/exportPdf";
 
 /**
- * UI-only units (includes ft-in fractional option) -> mapped to your store Units.
- * We keep store Units unchanged. "ft-in" is stored as "ft" under the hood.
+ * UI-only units -> mapped to store Units
+ * "ft-in-frac" stored as "ft"
  */
-type UiUnits = "mm" | "m" | "in" | "ft" | "ft-in";
+type UiUnits = "mm" | "m" | "in" | "ft" | "ft-in-frac";
 
 function clamp(n: number, min: number, max: number) {
   return Math.min(max, Math.max(min, n));
@@ -20,15 +28,6 @@ function parseNumberLoose(s: string): number | null {
   return Number.isFinite(v) ? v : null;
 }
 
-/**
- * Accepts:
- * - "10"
- * - "10.5"
- * - "10 3/4"
- * - "3/4"
- * - "10-3/4"
- * - "10 3/4\""
- */
 function parseFractionalInches(input: string): number | null {
   const s = input
     .toLowerCase()
@@ -38,11 +37,9 @@ function parseFractionalInches(input: string): number | null {
 
   if (!s) return null;
 
-  // Pure number
   const asNum = parseNumberLoose(s);
   if (asNum != null) return asNum;
 
-  // "a b/c" or "a-b/c"
   const m = s.match(/^(\d+)?(?:\s*[-\s]\s*)?(\d+)\s*\/\s*(\d+)$/);
   if (m) {
     const whole = m[1] ? Number(m[1]) : 0;
@@ -56,62 +53,49 @@ function parseFractionalInches(input: string): number | null {
 }
 
 /**
- * Accepts:
- * - "10' 6 1/2"
- * - "10' 6-1/2"
- * - "10 6 1/2"  (we’ll allow missing ')
- * - "10'" (feet only)
- * - "6 1/2" (assume inches only)
+ * ✅ fixed:
+ * - accepts "", "0", "0.0" as 0
+ * - accepts "3/8" style fractions
  */
-function parseFeetInchesFraction(input: string): number | null {
-  const s = input
-    .toLowerCase()
-    .replace(/″|”/g, '"')
-    .replace(/′|’/g, "'")
-    .replace(/["]/g, "") // we don't need inches quote
-    .replace(/\s+/g, " ")
-    .trim();
+function parseFracOrZero(s: string): number | null {
+  const t = String(s ?? "").trim();
+  if (!t || t === "0" || t === "0.0" || t === "0.00") return 0;
 
-  if (!s) return null;
+  // allow decimal too
+  const asNum = parseNumberLoose(t);
+  if (asNum != null) return asNum;
 
-  // If includes a feet marker '
-  if (s.includes("'")) {
-    const [feetPartRaw, restRaw] = s.split("'");
-    const feet = parseNumberLoose(feetPartRaw.trim());
-    if (feet == null) return null;
-
-    const rest = (restRaw ?? "").trim();
-    if (!rest) return feet; // feet only
-
-    // rest can be "6", "6 1/2", "6-1/2", "1/2"
-    const inches = parseFractionalInches(rest);
-    if (inches == null) return null;
-
-    return feet + inches / 12;
-  }
-
-  // No feet marker: try "feet inches..." or just inches
-  // If it looks like two parts: "10 6 1/2" => feet=10, inches="6 1/2"
-  const parts = s.split(" ");
-  if (parts.length >= 2) {
-    const feet = parseNumberLoose(parts[0]);
-    if (feet != null) {
-      const inchesStr = parts.slice(1).join(" ");
-      const inches = parseFractionalInches(inchesStr);
-      if (inches == null) return null;
-      return feet + inches / 12;
-    }
-  }
-
-  // Otherwise treat as inches only
-  const inchesOnly = parseFractionalInches(s);
-  if (inchesOnly == null) return null;
-  return inchesOnly / 12;
+  const m = t.match(/^(\d+)\s*\/\s*(\d+)$/);
+  if (!m) return null;
+  const num = Number(m[1]);
+  const den = Number(m[2]);
+  if (!Number.isFinite(num) || !Number.isFinite(den) || den === 0) return null;
+  return num / den;
 }
 
 function formatScale(stateScale: ScaleCal | null | undefined) {
   if (!stateScale) return "Not set";
   return `${stateScale.realDistance} ${stateScale.units} (calibrated)`;
+}
+
+// rgba helper for fill opacity UI
+function rgbaFromHex(hex: string, opacity: number) {
+  const m = hex.trim().match(/^#?([0-9a-fA-F]{6})$/);
+  if (!m) return `rgba(96,165,250,${opacity})`;
+  const s = m[1];
+  const r = parseInt(s.slice(0, 2), 16);
+  const g = parseInt(s.slice(2, 4), 16);
+  const b = parseInt(s.slice(4, 6), 16);
+  const a = Math.max(0, Math.min(1, opacity));
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function parseOpacityFromRgba(fill: string): number {
+  const s = (fill ?? "").trim().toLowerCase();
+  const m = s.match(/^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([0-9.]+)\s*\)$/);
+  if (!m) return 0.15;
+  const v = Number(m[1]);
+  return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.15;
 }
 
 export default function App() {
@@ -126,8 +110,11 @@ export default function App() {
   const viewerDropRef = useRef<HTMLDivElement | null>(null);
 
   // ---- Scale panel local UI state ----
-  const [scaleUnits, setScaleUnits] = useState<UiUnits>("ft-in");
-  const [scaleInput, setScaleInput] = useState<string>("10");
+  const [scaleUnits, setScaleUnits] = useState<UiUnits>("ft-in-frac");
+  const [scaleInput, setScaleInput] = useState<string>("10"); // used for non ft-in-frac
+  const [scaleFt, setScaleFt] = useState("0");
+  const [scaleIn, setScaleIn] = useState("0");
+  const [scaleFrac, setScaleFrac] = useState("0"); // e.g. 3/8 or 0
   const [scaleError, setScaleError] = useState<string | null>(null);
 
   const onMeta = useCallback((m: { pages: number }) => {
@@ -143,6 +130,7 @@ export default function App() {
   function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
+    if (f.type !== "application/pdf") return;
     setFile(f);
     setPage(1);
   }
@@ -189,27 +177,34 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const totalLengthThisPage = useMemo(() => {
-    const lines = state.polylines.filter((p) => p.page === page);
-    if (!state.scale) return undefined;
-    let sum = 0;
-    for (const l of lines) {
-      const v = computeLengthInUnits(state.scale, l.points);
-      if (v) sum += v;
-    }
-    return sum;
-  }, [state.polylines, state.scale, page]);
+  // --- Download helpers ---
+  function downloadBlob(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
 
-  const totalAreaThisPage = useMemo(() => {
-    const polys = state.polygons.filter((p) => p.page === page);
-    if (!state.scale) return undefined;
-    let sum = 0;
-    for (const g of polys) {
-      const v = computeAreaInUnits2(state.scale, g.points);
-      if (v) sum += v;
+  async function onDownloadPdf() {
+    if (!file) return;
+
+    try {
+      const originalPdfBytes = await file.arrayBuffer();
+      const outBytes = await exportPdfWithMarks({ originalPdfBytes, markState: state });
+
+      const outBlob = new Blob([new Uint8Array(outBytes)], { type: "application/pdf" });
+
+      const base = file.name?.replace(/\.pdf$/i, "") || "marked";
+      downloadBlob(outBlob, `${base}-marked.pdf`);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to export PDF. Check console for details.");
     }
-    return sum;
-  }, [state.polygons, state.scale, page]);
+  }
 
   function setTool(tool: Tool) {
     dispatch({ type: "SET_TOOL", tool });
@@ -225,32 +220,32 @@ export default function App() {
   const canApplyScale = !!(scaleDraft?.a && scaleDraft?.b);
 
   function mapUiUnitsToStore(u: UiUnits): Units {
-    if (u === "ft-in") return "ft";
+    if (u === "ft-in-frac") return "ft";
     return u as Units;
   }
 
-  function parseScaleDistanceToStoreUnits(input: string, u: UiUnits): number | null {
-    const trimmed = input.trim();
-    if (!trimmed) return null;
-
-    if (u === "mm" || u === "m") {
-      const v = parseNumberLoose(trimmed);
+  function parseScaleDistanceToStoreUnits(u: UiUnits): number | null {
+    // mm / m / ft numeric
+    if (u === "mm" || u === "m" || u === "ft") {
+      const v = parseNumberLoose(scaleInput.trim());
       return v != null && v > 0 ? v : null;
     }
 
+    // inches can be fractional
     if (u === "in") {
-      const inches = parseFractionalInches(trimmed);
+      const inches = parseFractionalInches(scaleInput.trim());
       return inches != null && inches > 0 ? inches : null;
     }
 
-    if (u === "ft") {
-      const v = parseNumberLoose(trimmed);
-      return v != null && v > 0 ? v : null;
-    }
+    // ft-in-frac uses 3 boxes
+    const ft = parseNumberLoose(scaleFt) ?? 0;
+    const inch = parseNumberLoose(scaleIn) ?? 0;
+    const frac = parseFracOrZero(scaleFrac);
+    if (frac == null) return null;
 
-    // ft-in fractional inches => store as feet
-    const feet = parseFeetInchesFraction(trimmed);
-    return feet != null && feet > 0 ? feet : null;
+    const totalIn = inch + frac;
+    const feet = ft + totalIn / 12;
+    return feet > 0 ? feet : null;
   }
 
   function onApplyScale() {
@@ -262,7 +257,7 @@ export default function App() {
     }
 
     const storeUnits = mapUiUnitsToStore(scaleUnits);
-    const realDistance = parseScaleDistanceToStoreUnits(scaleInput, scaleUnits);
+    const realDistance = parseScaleDistanceToStoreUnits(scaleUnits);
 
     if (realDistance == null || !Number.isFinite(realDistance) || realDistance <= 0) {
       setScaleError("Enter a valid real-world length.");
@@ -288,19 +283,63 @@ export default function App() {
     };
 
     dispatch({ type: "SET_SCALE", scale });
-    dispatch({ type: "CANCEL_DRAFT" }); // exit scale draft after applying
+    dispatch({ type: "CANCEL_DRAFT" });
   }
 
   function onResetScalePick() {
-    // Clear current draft so user can click A/B again
     dispatch({ type: "CANCEL_DRAFT" });
     setScaleError(null);
   }
 
-  // If user switches away from scale tool, clear scale error (UI nicety)
   useEffect(() => {
     if (state.tool !== "scale") setScaleError(null);
   }, [state.tool]);
+
+  const selected = useMemo(() => {
+    if (!state.selectedId) return null;
+    return state.marks.find((m) => m.id === state.selectedId) ?? null;
+  }, [state.marks, state.selectedId]);
+
+  const totalsThisPage = useMemo(() => {
+    if (!state.scale) return { line: undefined as number | undefined, area: undefined as number | undefined, perim: undefined as number | undefined };
+
+    const marks = state.marks.filter((m) => m.page === page);
+    let line = 0;
+    let area = 0;
+    let perim = 0;
+
+    for (const m of marks) {
+      const l = computeMarkLengthInUnits(state.scale, m);
+      if (l != null) line += l;
+
+      const a = computeMarkAreaInUnits(state.scale, m);
+      if (a != null) area += a;
+
+      const p = computeMarkPerimeterInUnits(state.scale, m);
+      if (p != null) perim += p;
+    }
+
+    return { line, area, perim };
+  }, [state.marks, state.scale, page]);
+
+  function patchSelected(patch: Partial<Mark>) {
+    if (!selected) return;
+    dispatch({ type: "UPDATE_MARK", id: selected.id, patch: patch as any });
+  }
+
+  // ---- Default Style UI state (kept directly in reducer state) ----
+  const defaultStroke = state.defaultStyle.stroke;
+  const defaultStrokeWidth = state.defaultStyle.strokeWidth;
+  const defaultFillHexForUi = useMemo(() => {
+    // if fill is rgba, we still show stroke as base color for fill
+    return state.defaultStyle.stroke;
+  }, [state.defaultStyle.stroke]);
+
+  const defaultFillOpacity = useMemo(() => parseOpacityFromRgba(state.defaultStyle.fill), [state.defaultStyle.fill]);
+
+  function setDefaultStyle(next: Partial<typeof state.defaultStyle>) {
+    dispatch({ type: "SET_DEFAULT_STYLE", style: { ...state.defaultStyle, ...next } });
+  }
 
   return (
     <div className="app">
@@ -317,14 +356,26 @@ export default function App() {
           <button className={`btn ${state.tool === "select" ? "btnOn" : ""}`} onClick={() => setTool("select")}>
             Select
           </button>
+          <button className={`btn ${state.tool === "edit" ? "btnOn" : ""}`} onClick={() => setTool("edit")}>
+            Edit
+          </button>
           <button className={`btn ${state.tool === "scale" ? "btnOn" : ""}`} onClick={() => setTool("scale")}>
             Scale
           </button>
-          <button className={`btn ${state.tool === "polyline" ? "btnOn" : ""}`} onClick={() => setTool("polyline")}>
-            Length
+          <button className={`btn ${state.tool === "line" ? "btnOn" : ""}`} onClick={() => setTool("line")}>
+            Line
           </button>
           <button className={`btn ${state.tool === "polygon" ? "btnOn" : ""}`} onClick={() => setTool("polygon")}>
-            Area
+            Polygon
+          </button>
+          <button className={`btn ${state.tool === "rect" ? "btnOn" : ""}`} onClick={() => setTool("rect")}>
+            Rect
+          </button>
+          <button className={`btn ${state.tool === "circle" ? "btnOn" : ""}`} onClick={() => setTool("circle")}>
+            Circle
+          </button>
+          <button className={`btn ${state.tool === "text" ? "btnOn" : ""}`} onClick={() => setTool("text")}>
+            Text
           </button>
         </div>
 
@@ -333,6 +384,10 @@ export default function App() {
         </button>
         <button className="btn" onClick={() => dispatch({ type: "REDO" })} disabled={hist.future.length === 0}>
           Redo
+        </button>
+
+        <button className="btn" onClick={onDownloadPdf} disabled={!file}>
+          Download PDF
         </button>
 
         <button className="btn" onClick={() => setPage((p) => clampPage(p - 1))} disabled={!file || page <= 1}>
@@ -368,7 +423,69 @@ export default function App() {
         </div>
 
         <div className="sidebar">
-          {/* Clean Scale panel only when Scale tool is active */}
+          {/* Default Style */}
+          <div style={{ fontWeight: 900, marginBottom: 10 }}>Default Style</div>
+
+          <div className="kv" style={{ marginBottom: 12 }}>
+            <div>Stroke</div>
+            <div>
+              <input
+                className="input"
+                type="color"
+                value={defaultStroke}
+                onChange={(e) => setDefaultStyle({ stroke: e.target.value })}
+                style={{ width: "100%", padding: 0 }}
+              />
+            </div>
+
+            <div>Width</div>
+            <div>
+              <input
+                className="input"
+                type="number"
+                min={1}
+                max={12}
+                value={defaultStrokeWidth}
+                onChange={(e) => setDefaultStyle({ strokeWidth: Math.max(1, Math.min(12, Number(e.target.value) || 1)) })}
+                style={{ width: "100%" }}
+              />
+            </div>
+
+            <div>Fill</div>
+            <div>
+              <input
+                className="input"
+                type="color"
+                value={defaultFillHexForUi}
+                onChange={(e) => {
+                  const next = rgbaFromHex(e.target.value, defaultFillOpacity);
+                  setDefaultStyle({ fill: next });
+                }}
+                style={{ width: "100%", padding: 0 }}
+              />
+            </div>
+
+            <div>Opacity</div>
+            <div>
+              <input
+                className="input"
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={defaultFillOpacity}
+                onChange={(e) => {
+                  const op = Math.max(0, Math.min(1, Number(e.target.value) || 0));
+                  setDefaultStyle({ fill: rgbaFromHex(defaultFillHexForUi, op) });
+                }}
+                style={{ width: "100%" }}
+              />
+            </div>
+          </div>
+
+          <hr style={{ margin: "12px 0", opacity: 0.2 }} />
+
+          {/* Scale panel only when Scale tool is active */}
           {state.tool === "scale" && (
             <div style={{ marginBottom: 14 }}>
               <div style={{ fontWeight: 900, marginBottom: 10 }}>Scale</div>
@@ -391,19 +508,27 @@ export default function App() {
                     <option value="m">m</option>
                     <option value="in">in</option>
                     <option value="ft">ft</option>
-                    <option value="ft-in">ft-in (fraction)</option>
+                    <option value="ft-in-frac">ft-in-frac</option>
                   </select>
                 </div>
 
                 <div>Length</div>
                 <div>
-                  <input
-                    className="input"
-                    value={scaleInput}
-                    onChange={(e) => setScaleInput(e.target.value)}
-                    placeholder={scaleUnits === "ft-in" ? `Example: 10' 6 1/2` : "Example: 10"}
-                    style={{ width: "100%" }}
-                  />
+                  {scaleUnits === "ft-in-frac" ? (
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input className="input" value={scaleFt} onChange={(e) => setScaleFt(e.target.value)} placeholder="ft" style={{ width: "33%" }} />
+                      <input className="input" value={scaleIn} onChange={(e) => setScaleIn(e.target.value)} placeholder="in" style={{ width: "33%" }} />
+                      <input className="input" value={scaleFrac} onChange={(e) => setScaleFrac(e.target.value)} placeholder="frac (3/8 or 0)" style={{ width: "34%" }} />
+                    </div>
+                  ) : (
+                    <input
+                      className="input"
+                      value={scaleInput}
+                      onChange={(e) => setScaleInput(e.target.value)}
+                      placeholder={scaleUnits === "in" ? `Example: 10 3/8` : "Example: 10"}
+                      style={{ width: "100%" }}
+                    />
+                  )}
                 </div>
               </div>
 
@@ -430,6 +555,187 @@ export default function App() {
             </div>
           )}
 
+          {/* Selected object panel */}
+          <div style={{ fontWeight: 900, marginBottom: 10 }}>Selected Object</div>
+
+          {!selected ? (
+            <div className="muted" style={{ marginBottom: 14 }}>
+              None selected. Use <b>Select</b> or <b>Edit</b>, then click an object.
+            </div>
+          ) : (
+            <div style={{ marginBottom: 14 }}>
+              <div className="kv">
+                <div>ID</div>
+                <div className="muted">{selected.id}</div>
+
+                <div>Type</div>
+                <div className="muted">{selected.kind}</div>
+
+                <div>Mode</div>
+                <div>
+                  <button className="btn" onClick={() => setTool("edit")}>
+                    Edit
+                  </button>
+                </div>
+
+                {/* Style overrides */}
+                <div>Stroke</div>
+                <div>
+                  <input
+                    className="input"
+                    type="color"
+                    value={(selected.style?.stroke as string) ?? state.defaultStyle.stroke}
+                    onChange={(e) => patchSelected({ style: { ...(selected.style ?? {}), stroke: e.target.value } } as any)}
+                    style={{ width: "100%", padding: 0 }}
+                  />
+                </div>
+
+                <div>Width</div>
+                <div>
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    max={12}
+                    value={selected.style?.strokeWidth ?? state.defaultStyle.strokeWidth}
+                    onChange={(e) =>
+                      patchSelected({
+                        style: { ...(selected.style ?? {}), strokeWidth: Math.max(1, Math.min(12, Number(e.target.value) || 1)) },
+                      } as any)
+                    }
+                    style={{ width: "100%" }}
+                  />
+                </div>
+
+                {selected.kind !== "line" && selected.kind !== "text" && (
+                  <>
+                    <div>Fill</div>
+                    <div>
+                      <input
+                        className="input"
+                        type="color"
+                        value={(selected.style?.stroke as string) ?? state.defaultStyle.stroke}
+                        onChange={(e) => {
+                          const op = parseOpacityFromRgba(selected.style?.fill ?? state.defaultStyle.fill);
+                          patchSelected({ style: { ...(selected.style ?? {}), fill: rgbaFromHex(e.target.value, op) } } as any);
+                        }}
+                        style={{ width: "100%", padding: 0 }}
+                      />
+                    </div>
+
+                    <div>Opacity</div>
+                    <div>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={parseOpacityFromRgba(selected.style?.fill ?? state.defaultStyle.fill)}
+                        onChange={(e) => {
+                          const op = Math.max(0, Math.min(1, Number(e.target.value) || 0));
+                          const baseHex = (selected.style?.stroke as string) ?? state.defaultStyle.stroke;
+                          patchSelected({ style: { ...(selected.style ?? {}), fill: rgbaFromHex(baseHex, op) } } as any);
+                        }}
+                        style={{ width: "100%" }}
+                      />
+                    </div>
+                  </>
+                )}
+
+                {selected.kind === "text" && (
+                  <>
+                    <div>Text</div>
+                    <div>
+                      <input
+                        className="input"
+                        value={(selected as any).text ?? ""}
+                        onChange={(e) => patchSelected({ text: e.target.value } as any)}
+                        style={{ width: "100%" }}
+                      />
+                    </div>
+
+                    <div>Size</div>
+                    <div>
+                      <input
+                        className="input"
+                        type="number"
+                        min={6}
+                        max={72}
+                        value={(selected as any).fontSize ?? 14}
+                        onChange={(e) => patchSelected({ fontSize: Math.max(6, Math.min(72, Number(e.target.value) || 14)) } as any)}
+                        style={{ width: "100%" }}
+                      />
+                    </div>
+                  </>
+                )}
+
+                {/* Measurements */}
+                <div>Measurements</div>
+                <div className="muted">
+                  {state.scale
+                    ? (() => {
+                        const parts: string[] = [];
+                        const l = computeMarkLengthInUnits(state.scale, selected);
+                        const a = computeMarkAreaInUnits(state.scale, selected);
+                        const p = computeMarkPerimeterInUnits(state.scale, selected);
+                        if (l != null) parts.push(`L ${l.toFixed(2)} ${state.scale.units}`);
+                        if (a != null) parts.push(`A ${a.toFixed(2)} ${state.scale.units}²`);
+                        if (p != null) parts.push(`P ${p.toFixed(2)} ${state.scale.units}`);
+                        return parts.length ? parts.join(" • ") : "—";
+                      })()
+                    : "Set scale to measure"}
+                </div>
+
+                {selected.kind !== "line" && selected.kind !== "text" && (
+                  <>
+                    <div>Show area</div>
+                    <div>
+                      <input
+                        type="checkbox"
+                        checked={!!selected.measure?.showArea}
+                        onChange={(e) => patchSelected({ measure: { ...(selected.measure ?? {}), showArea: e.target.checked } } as any)}
+                      />
+                    </div>
+
+                    <div>Show perimeter</div>
+                    <div>
+                      <input
+                        type="checkbox"
+                        checked={!!selected.measure?.showPerimeter}
+                        onChange={(e) => patchSelected({ measure: { ...(selected.measure ?? {}), showPerimeter: e.target.checked } } as any)}
+                      />
+                    </div>
+
+                    {(selected.kind === "polygon" || selected.kind === "rect") && (
+                      <>
+                        <div>Segment lengths</div>
+                        <div>
+                          <input
+                            type="checkbox"
+                            checked={!!selected.measure?.showSegmentLengths}
+                            onChange={(e) =>
+                              patchSelected({ measure: { ...(selected.measure ?? {}), showSegmentLengths: e.target.checked } } as any)
+                            }
+                          />
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+
+              <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                <button className="btn" onClick={() => dispatch({ type: "DELETE_SELECTED" })}>
+                  Delete
+                </button>
+              </div>
+
+              <hr style={{ marginTop: 14, opacity: 0.2 }} />
+            </div>
+          )}
+
+          {/* Measurement panel */}
           <div style={{ fontWeight: 900, marginBottom: 10 }}>Measurement Panel</div>
 
           <div className="kv">
@@ -445,22 +751,29 @@ export default function App() {
                 ? `Length: ${state.live.length.toFixed(2)} ${state.scale?.units ?? ""}`
                 : state.live?.area != null
                 ? `Area: ${state.live.area.toFixed(2)} ${(state.scale?.units ?? "")}²`
+                : state.live?.perimeter != null
+                ? `Perimeter: ${state.live.perimeter.toFixed(2)} ${state.scale?.units ?? ""}`
                 : "—"}
             </div>
 
-            <div>Total length (page)</div>
+            <div>Total line length (page)</div>
             <div className="muted">
-              {totalLengthThisPage != null && state.scale ? `${totalLengthThisPage.toFixed(2)} ${state.scale.units}` : "—"}
+              {totalsThisPage.line != null && state.scale ? `${totalsThisPage.line.toFixed(2)} ${state.scale.units}` : "—"}
             </div>
 
             <div>Total area (page)</div>
             <div className="muted">
-              {totalAreaThisPage != null && state.scale ? `${totalAreaThisPage.toFixed(2)} ${state.scale.units}²` : "—"}
+              {totalsThisPage.area != null && state.scale ? `${totalsThisPage.area.toFixed(2)} ${state.scale.units}²` : "—"}
+            </div>
+
+            <div>Total perimeter (page)</div>
+            <div className="muted">
+              {totalsThisPage.perim != null && state.scale ? `${totalsThisPage.perim.toFixed(2)} ${state.scale.units}` : "—"}
             </div>
           </div>
 
           <div style={{ marginTop: 14 }} className="muted">
-            Tips: Double-click to finish • Esc cancels • Ctrl/Cmd+Z undo
+            Tips: Line = 2 clicks • Polygon = click points + Enter/Double-click • Text = click to place • Edit = drag • Esc cancels • Ctrl/Cmd+Z undo
           </div>
         </div>
       </div>
