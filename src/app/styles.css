@@ -82,6 +82,13 @@ body {
   border-radius: 14px;
   background: var(--panel);
   padding: 12px;
+  overflow: auto; /* ✅ FIX 3 */
+}
+
+.sidebarStack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px; /* ✅ FIX 3 */
 }
 
 .kv { display: grid; grid-template-columns: 90px 1fr; gap: 8px; font-size: 13px; }
@@ -171,3 +178,28 @@ body {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+.hr {
+  border: none;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  margin: 12px 0;
+}
+
+.rowBtns { display: flex; gap: 10px; }
+
+.btnDanger {
+  border: 1px solid rgba(251, 113, 133, 0.55);
+  background: rgba(251, 113, 133, 0.12);
+  color: rgba(255,255,255,0.95);
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 900;
+  font-size: 13px;
+}
+
+.btnDanger:hover { border-color: rgba(251, 113, 133, 0.9); }
+
+.checks { display: flex; flex-direction: column; gap: 8px; }
+.checkRow { display: flex; gap: 10px; align-items: center; font-size: 13px; color: rgba(255,255,255,0.92); }
+.checkRow span { color: rgba(255,255,255,0.92); }

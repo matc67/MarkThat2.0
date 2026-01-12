@@ -32,9 +32,9 @@ export type MarkMeasure = {
 };
 
 export type MarkStyle = {
-  stroke?: string;      // css hex or rgb/rgba
+  stroke?: string; // css hex or rgb/rgba
   strokeWidth?: number;
-  fill?: string;        // css rgba or hex
+  fill?: string; // css rgba or hex | "transparent" | "none"
 };
 
 export type MarkBase = {
@@ -77,13 +77,14 @@ export type TextMark = MarkBase & {
 
 export type Mark = LineMark | PolygonMark | RectMark | CircleMark | TextMark;
 
+// ✅ UPDATED: text draft now carries text + fontSize while drafting
 export type Draft =
   | { kind: "line"; page: number; a?: PdfPoint; b?: PdfPoint }
   | { kind: "polygon"; page: number; points: PdfPoint[] }
   | { kind: "rect"; page: number; a?: PdfPoint; b?: PdfPoint }
   | { kind: "circle"; page: number; c?: PdfPoint; r?: number }
   | { kind: "scale"; page: number; a?: PdfPoint; b?: PdfPoint }
-  | { kind: "text"; page: number; p?: PdfPoint };
+  | { kind: "text"; page: number; p?: PdfPoint; text?: string; fontSize?: number };
 
 export type MarkState = {
   tool: Tool;
@@ -93,7 +94,6 @@ export type MarkState = {
   live: { length?: number; area?: number; perimeter?: number } | null;
   selectedId: string | null;
 
-  // ✅ new
   defaultStyle: {
     stroke: string;
     strokeWidth: number;

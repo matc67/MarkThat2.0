@@ -33,16 +33,20 @@ function cssRgbToRgb01(input: string) {
   return { color: rgb(r / 255, g / 255, b / 255), opacity: clamp01(a) };
 }
 
-function parseCssColor(input: string | undefined | null): { color: any; opacity: number } | null {
-  if (!input) return null;
+type ParsedCss = { color: any | null; opacity: number; none: boolean };
 
-  const asRgb = cssRgbToRgb01(input);
-  if (asRgb) return asRgb;
+function parseCssColor(input: string | undefined | null): ParsedCss {
+  const s = (input ?? "").trim().toLowerCase();
+  if (!s) return { color: null, opacity: 1, none: true };
+  if (s === "none" || s === "transparent") return { color: null, opacity: 0, none: true };
 
-  const asHex = hexToRgb01(input);
-  if (asHex) return { color: asHex, opacity: 1 };
+  const asRgb = cssRgbToRgb01(s);
+  if (asRgb) return { color: asRgb.color, opacity: asRgb.opacity, none: false };
 
-  return null;
+  const asHex = hexToRgb01(s);
+  if (asHex) return { color: asHex, opacity: 1, none: false };
+
+  return { color: null, opacity: 1, none: true };
 }
 
 function drawPolyline(
@@ -75,7 +79,6 @@ function drawPolyline(
   }
 }
 
-// ✅ Fill polygon using drawSvgPath (works in older pdf-lib versions)
 function polygonToSvgPath(pts: PdfPoint[]) {
   if (pts.length < 2) return "";
   let d = `M ${pts[0].x} ${pts[0].y}`;
@@ -106,48 +109,65 @@ export async function exportPdfWithMarks(args: {
     for (const m of marks) {
       const sw = m.style?.strokeWidth ?? 2;
 
+      // ---- stroke ----
       const strokeParsed = parseCssColor(m.style?.stroke);
-      const strokeColor = strokeParsed?.color ?? defaultStroke;
-      const strokeOpacity = strokeParsed?.opacity ?? defaultStrokeOpacity;
+      const strokeColor = strokeParsed.none ? defaultStroke : strokeParsed.color ?? defaultStroke;
+      const strokeOpacity = strokeParsed.none ? 0 : strokeParsed.opacity ?? defaultStrokeOpacity;
 
+      // ---- fill ----
       const fillParsed = parseCssColor(m.style?.fill);
-      const fillColor = fillParsed?.color ?? strokeColor;
-      const fillOpacity =
-        fillParsed?.opacity ??
-        (m.kind === "rect" || m.kind === "circle" || m.kind === "polygon" ? defaultFillOpacity : 0);
 
+      // If fill is explicitly none/transparent -> NO FILL
+      const fillIsNone = fillParsed.none || fillParsed.opacity <= 0;
+
+      // If a real fill color is provided, use it. Otherwise (only for shapes) default to stroke tint.
+      const fillColor =
+        fillIsNone
+          ? null
+          : fillParsed.color ?? strokeColor;
+
+      const fillOpacity =
+        fillIsNone
+          ? 0
+          : clamp01(
+              fillParsed.opacity ??
+                (m.kind === "rect" || m.kind === "circle" || m.kind === "polygon" ? defaultFillOpacity : 0)
+            );
+
+      // ---- draw ----
       if (m.kind === "line") {
         page.drawLine({
           start: { x: m.a.x, y: m.a.y },
           end: { x: m.b.x, y: m.b.y },
           thickness: sw,
           color: strokeColor,
-          opacity: strokeOpacity,
+          opacity: clamp01(strokeOpacity),
         });
         continue;
       }
 
-      // ✅ Polygon: fill via drawSvgPath + outline via drawLine
+      // ✅ Polygon: fill (svg path) + stroke (lines)
       if (m.kind === "polygon") {
         if (m.points.length < 2) continue;
 
-        if (m.points.length >= 3 && fillOpacity > 0) {
+        // FILL FIRST so outline sits on top
+        if (m.points.length >= 3 && fillColor && fillOpacity > 0) {
           const d = polygonToSvgPath(m.points);
-
-          // pdf-lib typings vary, so cast to any
           (page as any).drawSvgPath(d, {
             color: fillColor,
             opacity: clamp01(fillOpacity),
           });
         }
 
-        // stroke outline (always)
-        drawPolyline(page, m.points, {
-          color: strokeColor,
-          opacity: strokeOpacity,
-          thickness: sw,
-          closed: true,
-        });
+        // STROKE outline
+        if (strokeOpacity > 0) {
+          drawPolyline(page, m.points, {
+            color: strokeColor,
+            opacity: clamp01(strokeOpacity),
+            thickness: sw,
+            closed: true,
+          });
+        }
 
         continue;
       }
@@ -158,18 +178,15 @@ export async function exportPdfWithMarks(args: {
         const x2 = Math.max(m.a.x, m.b.x);
         const y2 = Math.max(m.a.y, m.b.y);
 
-        const w = x2 - x1;
-        const h = y2 - y1;
-
         page.drawRectangle({
           x: x1,
           y: y1,
-          width: w,
-          height: h,
-          borderColor: strokeColor,
+          width: x2 - x1,
+          height: y2 - y1,
+          borderColor: strokeOpacity > 0 ? strokeColor : undefined,
           borderWidth: sw,
-          borderOpacity: strokeOpacity,
-          color: fillColor,
+          borderOpacity: clamp01(strokeOpacity),
+          color: fillColor ?? undefined,
           opacity: clamp01(fillOpacity),
         });
 
@@ -181,16 +198,15 @@ export async function exportPdfWithMarks(args: {
           x: m.c.x,
           y: m.c.y,
           size: m.r,
-          borderColor: strokeColor,
+          borderColor: strokeOpacity > 0 ? strokeColor : undefined,
           borderWidth: sw,
-          borderOpacity: strokeOpacity,
-          color: fillColor,
+          borderOpacity: clamp01(strokeOpacity),
+          color: fillColor ?? undefined,
           opacity: clamp01(fillOpacity),
         });
         continue;
       }
 
-      // ✅ Text export (from our earlier update)
       if (m.kind === "text") {
         const size = (m as any).fontSize ?? 14;
         page.drawText((m as any).text ?? "", {
@@ -198,7 +214,7 @@ export async function exportPdfWithMarks(args: {
           y: (m as any).p.y,
           size,
           color: strokeColor,
-          opacity: strokeOpacity,
+          opacity: clamp01(strokeOpacity),
         });
         continue;
       }

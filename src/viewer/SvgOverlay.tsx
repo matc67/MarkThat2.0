@@ -21,6 +21,9 @@ type Props = {
 
 type VpPoint = { x: number; y: number };
 
+const HIT_R = 8; // px hit radius for handles
+const HANDLE_R = 5;
+
 function dist2(a: VpPoint, b: VpPoint) {
   const dx = a.x - b.x;
   const dy = a.y - b.y;
@@ -49,8 +52,9 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
     if (!el) return;
 
     el.style.pointerEvents = "auto";
+
     const tool = markState.tool;
-    if (tool === "line" || tool === "polygon" || tool === "rect" || tool === "circle" || tool === "scale") {
+    if (tool === "line" || tool === "polygon" || tool === "rect" || tool === "circle" || tool === "scale" || tool === "text") {
       el.style.cursor = "crosshair";
     } else if (tool === "edit") {
       el.style.cursor = "grab";
@@ -73,6 +77,11 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
     return { x, y };
   }
 
+  function mouseVpFromEvent(e: React.MouseEvent, svg: SVGSVGElement): VpPoint {
+    const rect = svg.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
   function pathFromPdfPoints(points: PdfPoint[], close = false) {
     if (!viewport || points.length === 0) return "";
     const a = toVp(points[0]);
@@ -88,24 +97,14 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
   function ensureDraft(kind: Draft["kind"]) {
     if (draft) return;
 
-    if (kind === "polygon") {
-      dispatch({ type: "START_DRAFT", draft: { kind: "polygon", page, points: [] } });
-      return;
-    }
-    if (kind === "line") {
-      dispatch({ type: "START_DRAFT", draft: { kind: "line", page } });
-      return;
-    }
-    if (kind === "rect") {
-      dispatch({ type: "START_DRAFT", draft: { kind: "rect", page } });
-      return;
-    }
-    if (kind === "circle") {
-      dispatch({ type: "START_DRAFT", draft: { kind: "circle", page } });
-      return;
-    }
+    if (kind === "polygon") return dispatch({ type: "START_DRAFT", draft: { kind: "polygon", page, points: [] } });
+    if (kind === "line") return dispatch({ type: "START_DRAFT", draft: { kind: "line", page } });
+    if (kind === "rect") return dispatch({ type: "START_DRAFT", draft: { kind: "rect", page } });
+    if (kind === "circle") return dispatch({ type: "START_DRAFT", draft: { kind: "circle", page } });
+    if (kind === "text") return dispatch({ type: "START_DRAFT", draft: { kind: "text", page, text: "", fontSize: 14 } });
+
     // scale
-    dispatch({ type: "START_DRAFT", draft: { kind: "scale", page } });
+    return dispatch({ type: "START_DRAFT", draft: { kind: "scale", page } });
   }
 
   // ---- Live measurement while drafting ----
@@ -147,22 +146,63 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
       return;
     }
 
-    // scale doesn't show measurements
     dispatch({ type: "SET_LIVE", live: null });
   }
 
-  // ---- Edit dragging (move whole mark) ----
-  const dragRef = useRef<
-    | null
-    | {
-        id: string;
-        startPdf: PdfPoint;
-        startMark: Mark;
+  // ---- Handle hit testing for edit mode ----
+  function findHandleHit(m: Mark, mouseVp: VpPoint) {
+    if (!viewport) return null;
+    const r2 = HIT_R * HIT_R;
+
+    if (m.kind === "line") {
+      const a = toVp(m.a);
+      const b = toVp(m.b);
+      if (dist2(a, mouseVp) <= r2) return { kind: "line" as const, which: "a" as const };
+      if (dist2(b, mouseVp) <= r2) return { kind: "line" as const, which: "b" as const };
+      return null;
+    }
+
+    if (m.kind === "polygon") {
+      for (let i = 0; i < m.points.length; i++) {
+        const v = toVp(m.points[i]);
+        if (dist2(v, mouseVp) <= r2) return { kind: "polygon" as const, index: i };
       }
-  >(null);
+      return null;
+    }
+
+    if (m.kind === "rect") {
+      const pts = rectPoints(m);
+      for (let i = 0; i < pts.length; i++) {
+        const v = toVp(pts[i]);
+        if (dist2(v, mouseVp) <= r2) return { kind: "rect" as const, index: i };
+      }
+      return null;
+    }
+
+    if (m.kind === "circle") {
+      const c = toVp(m.c);
+      if (dist2(c, mouseVp) <= r2) return { kind: "circle" as const, which: "c" as const };
+      const rh = toVp({ x: m.c.x + m.r, y: m.c.y });
+      if (dist2(rh, mouseVp) <= r2) return { kind: "circle" as const, which: "r" as const };
+      return null;
+    }
+
+    if (m.kind === "text") {
+      const p = toVp(m.p);
+      if (dist2(p, mouseVp) <= r2) return { kind: "text" as const };
+      return null;
+    }
+
+    return null;
+  }
 
   function hitTestMark(m: Mark, mouseVp: VpPoint) {
     if (!viewport) return false;
+
+    if (m.kind === "text") {
+      const p = toVp(m.p);
+      return mouseVp.x >= p.x - 10 && mouseVp.x <= p.x + 220 && mouseVp.y >= p.y - 22 && mouseVp.y <= p.y + 10;
+    }
 
     if (m.kind === "line") {
       const a = toVp(m.a);
@@ -223,15 +263,32 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
     return false;
   }
 
-  // Key handlers: Enter commits, Delete removes selected
+  // ---- Editing drag state (move or handle) ----
+  const dragRef = useRef<
+    | null
+    | {
+        id: string;
+        mode: "move" | "handle";
+        handle?: { kind: Mark["kind"]; index?: number; which?: "a" | "b" | "c" | "r" };
+        startPdf: PdfPoint;
+        startMark: Mark;
+      }
+  >(null);
+
+  // Key handlers
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        if (markState.draft) dispatch({ type: "CANCEL_DRAFT" });
+      }
+
       if (e.key === "Enter") {
         if (!draft) return;
         if (draft.kind === "polygon" && draft.points.length >= 3) dispatch({ type: "COMMIT_DRAFT" });
         if (draft.kind === "line" && draft.a && draft.b) dispatch({ type: "COMMIT_DRAFT" });
         if (draft.kind === "rect" && draft.a && draft.b) dispatch({ type: "COMMIT_DRAFT" });
         if (draft.kind === "circle" && draft.c && typeof draft.r === "number" && draft.r > 0) dispatch({ type: "COMMIT_DRAFT" });
+        if (draft.kind === "text") dispatch({ type: "COMMIT_DRAFT" });
       }
 
       if (e.key === "Backspace" || e.key === "Delete") {
@@ -243,7 +300,7 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [draft, dispatch, markState.tool, markState.selectedId]);
+  }, [draft, dispatch, markState.draft, markState.tool, markState.selectedId]);
 
   // ---- Rect/Circle drag-to-create ----
   const draftDragRef = useRef<null | { kind: "rect" | "circle" }>(null);
@@ -251,12 +308,14 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
   function onClick(e: React.MouseEvent) {
     if (!viewport || !svgRef.current) return;
 
+    // If we're currently editing a text draft, don't let clicks do other things.
+    if (draft?.kind === "text") return;
+
     const tool = markState.tool;
 
     // Selection click
     if (tool === "select" || tool === "edit") {
-      const rect = svgRef.current.getBoundingClientRect();
-      const mouseVp: VpPoint = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const mouseVp = mouseVpFromEvent(e, svgRef.current);
 
       for (let i = marks.length - 1; i >= 0; i--) {
         if (hitTestMark(marks[i], mouseVp)) {
@@ -268,7 +327,7 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
       return;
     }
 
-    // Scale tool click
+    // Scale
     if (tool === "scale") {
       ensureDraft("scale");
       const p = toPdf(e, svgRef.current);
@@ -277,7 +336,15 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
       return;
     }
 
-    // Line 2-click tool
+    // ✅ Text: click starts a draft with inline editor (NO instant commit)
+    if (tool === "text") {
+      const p = toPdf(e, svgRef.current);
+      if (!p) return;
+      dispatch({ type: "START_DRAFT", draft: { kind: "text", page, p, text: "", fontSize: 14 } });
+      return;
+    }
+
+    // Line
     if (tool === "line") {
       ensureDraft("line");
       const p = toPdf(e, svgRef.current);
@@ -293,7 +360,7 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
       return;
     }
 
-    // Polygon click-to-add-points
+    // Polygon
     if (tool === "polygon") {
       ensureDraft("polygon");
       const p = toPdf(e, svgRef.current);
@@ -308,14 +375,14 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
   function onMouseDown(e: React.MouseEvent) {
     if (!viewport || !svgRef.current) return;
 
-    const tool = markState.tool;
+    // Don't start drags while editing text draft
+    if (draft?.kind === "text") return;
 
-    const rect = svgRef.current.getBoundingClientRect();
-    const mouseVp: VpPoint = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const tool = markState.tool;
+    const mouseVp = mouseVpFromEvent(e, svgRef.current);
     const mousePdf = toPdf(e, svgRef.current);
     if (!mousePdf) return;
 
-    // Edit: drag to move
     if (tool === "edit") {
       let target: Mark | null = null;
 
@@ -335,13 +402,21 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
       }
 
       dispatch({ type: "SELECT", id: target.id });
-      dragRef.current = { id: target.id, startPdf: mousePdf, startMark: target };
+
+      const handle = findHandleHit(target, mouseVp);
+
+      dragRef.current = {
+        id: target.id,
+        mode: handle ? "handle" : "move",
+        handle: handle ?? undefined,
+        startPdf: mousePdf,
+        startMark: target,
+      };
 
       e.preventDefault();
       return;
     }
 
-    // Rect / Circle click-drag create
     if (tool === "rect") {
       dispatch({ type: "START_DRAFT", draft: { kind: "rect", page, a: mousePdf, b: mousePdf } });
       draftDragRef.current = { kind: "rect" };
@@ -380,7 +455,6 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
     setHoverPdf(p);
     updateLive(p);
 
-    // update rect/circle draft while dragging
     const dd = draftDragRef.current;
     if (dd && p && draft) {
       if (dd.kind === "rect" && draft.kind === "rect" && draft.a) {
@@ -393,7 +467,6 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
       return;
     }
 
-    // edit dragging (move whole mark)
     const dr = dragRef.current;
     if (!dr || !p) return;
 
@@ -401,30 +474,73 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
     const dy = p.y - dr.startPdf.y;
     const m = dr.startMark;
 
-    if (m.kind === "line") {
+    if (dr.mode === "move") {
+      if (m.kind === "line") {
+        dispatch({
+          type: "UPDATE_MARK",
+          id: dr.id,
+          patch: { a: { x: m.a.x + dx, y: m.a.y + dy }, b: { x: m.b.x + dx, y: m.b.y + dy } } as any,
+        });
+      } else if (m.kind === "polygon") {
+        dispatch({
+          type: "UPDATE_MARK",
+          id: dr.id,
+          patch: { points: m.points.map((pt) => ({ x: pt.x + dx, y: pt.y + dy })) } as any,
+        });
+      } else if (m.kind === "rect") {
+        dispatch({
+          type: "UPDATE_MARK",
+          id: dr.id,
+          patch: { a: { x: m.a.x + dx, y: m.a.y + dy }, b: { x: m.b.x + dx, y: m.b.y + dy } } as any,
+        });
+      } else if (m.kind === "circle") {
+        dispatch({
+          type: "UPDATE_MARK",
+          id: dr.id,
+          patch: { c: { x: m.c.x + dx, y: m.c.y + dy } } as any,
+        });
+      } else if (m.kind === "text") {
+        dispatch({
+          type: "UPDATE_MARK",
+          id: dr.id,
+          patch: { p: { x: m.p.x + dx, y: m.p.y + dy } } as any,
+        });
+      }
+      return;
+    }
+
+    const h = dr.handle!;
+    if (m.kind === "line" && h.which) {
       dispatch({
         type: "UPDATE_MARK",
         id: dr.id,
-        patch: { a: { x: m.a.x + dx, y: m.a.y + dy }, b: { x: m.b.x + dx, y: m.b.y + dy } } as any,
+        patch: (h.which === "a" ? { a: p } : { b: p }) as any,
       });
-    } else if (m.kind === "polygon") {
-      dispatch({
-        type: "UPDATE_MARK",
-        id: dr.id,
-        patch: { points: m.points.map((pt) => ({ x: pt.x + dx, y: pt.y + dy })) } as any,
-      });
-    } else if (m.kind === "rect") {
-      dispatch({
-        type: "UPDATE_MARK",
-        id: dr.id,
-        patch: { a: { x: m.a.x + dx, y: m.a.y + dy }, b: { x: m.b.x + dx, y: m.b.y + dy } } as any,
-      });
-    } else if (m.kind === "circle") {
-      dispatch({
-        type: "UPDATE_MARK",
-        id: dr.id,
-        patch: { c: { x: m.c.x + dx, y: m.c.y + dy } } as any,
-      });
+      return;
+    }
+
+    if (m.kind === "polygon" && typeof h.index === "number") {
+      const next = [...m.points];
+      next[h.index] = p;
+      dispatch({ type: "UPDATE_MARK", id: dr.id, patch: { points: next } as any });
+      return;
+    }
+
+    if (m.kind === "rect" && typeof h.index === "number") {
+      const pts = rectPoints(m);
+      const opp = pts[(h.index + 2) % 4];
+      dispatch({ type: "UPDATE_MARK", id: dr.id, patch: { a: opp, b: p } as any });
+      return;
+    }
+
+    if (m.kind === "circle" && h.which) {
+      if (h.which === "c") {
+        dispatch({ type: "UPDATE_MARK", id: dr.id, patch: { c: p } as any });
+      } else {
+        const r = Math.hypot(p.x - m.c.x, p.y - m.c.y);
+        dispatch({ type: "UPDATE_MARK", id: dr.id, patch: { r: Math.max(0, r) } as any });
+      }
+      return;
     }
   }
 
@@ -484,6 +600,8 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
 
   if (!viewport) return null;
 
+  const textDraft = draft?.kind === "text" ? draft : null;
+
   return (
     <svg
       ref={svgRef}
@@ -496,8 +614,7 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
       onMouseUp={onMouseUp}
       style={{ position: "absolute", left: 0, top: 0 }}
     >
-      {/* ✅ Event-capture layer: makes hover + scale preview reliable everywhere */}
-      <rect x={0} y={0} width={viewport.width} height={viewport.height} fill="transparent" />
+      <rect x={0} y={0} width={viewport.width} height={viewport.height} fill="transparent" pointerEvents="all" />
 
       {/* Committed marks */}
       {marks.map((m) => {
@@ -508,10 +625,43 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
           (m.kind === "polygon" || m.kind === "rect" || m.kind === "circle" ? "rgba(96,165,250,0.15)" : "none");
         const isSel = m.id === markState.selectedId;
 
-        if (m.kind === "line") {
+        if (m.kind === "text") {
+          const vp = toVp(m.p);
+          const size = m.fontSize ?? 14;
           return (
-            <g key={m.id}>
+            <g key={m.id} data-mark="1" data-mark-id={m.id}>
+              <text x={vp.x} y={vp.y} fontSize={size} fill={stroke}>
+                {m.text}
+              </text>
+              {isSel && (
+                <rect
+                  x={vp.x - 8}
+                  y={vp.y - size - 6}
+                  width={240}
+                  height={size + 12}
+                  fill="none"
+                  stroke="#f59e0b"
+                  strokeWidth={1.5}
+                  data-handle="1"
+                />
+              )}
+              {isSel && <circle cx={vp.x} cy={vp.y} r={HANDLE_R} fill="#f59e0b" data-handle="1" />}
+            </g>
+          );
+        }
+
+        if (m.kind === "line") {
+          const aVp = toVp(m.a);
+          const bVp = toVp(m.b);
+          return (
+            <g key={m.id} data-mark="1" data-mark-id={m.id}>
               <path d={pathFromPdfPoints([m.a, m.b])} fill="none" stroke={stroke} strokeWidth={sw} />
+              {isSel && (
+                <>
+                  <circle cx={aVp.x} cy={aVp.y} r={HANDLE_R} fill="#f59e0b" data-handle="1" />
+                  <circle cx={bVp.x} cy={bVp.y} r={HANDLE_R} fill="#f59e0b" data-handle="1" />
+                </>
+              )}
             </g>
           );
         }
@@ -519,9 +669,13 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
         if (m.kind === "polygon") {
           const d = pathFromPdfPoints(m.points, true);
           return (
-            <g key={m.id}>
+            <g key={m.id} data-mark="1" data-mark-id={m.id}>
               <path d={d} fill={fill} stroke={stroke} strokeWidth={sw} />
               {isSel && drawCenterLabel(m)}
+              {isSel &&
+                m.points.map((p, i) => (
+                  <circle key={i} cx={toVp(p).x} cy={toVp(p).y} r={HANDLE_R} fill="#f59e0b" data-handle="1" />
+                ))}
             </g>
           );
         }
@@ -530,9 +684,13 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
           const pts = rectPoints(m);
           const d = pathFromPdfPoints(pts, true);
           return (
-            <g key={m.id}>
+            <g key={m.id} data-mark="1" data-mark-id={m.id}>
               <path d={d} fill={fill} stroke={stroke} strokeWidth={sw} />
               {isSel && drawCenterLabel(m)}
+              {isSel &&
+                pts.map((p, i) => (
+                  <circle key={i} cx={toVp(p).x} cy={toVp(p).y} r={HANDLE_R} fill="#f59e0b" data-handle="1" />
+                ))}
             </g>
           );
         }
@@ -541,10 +699,17 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
           const cVp = toVp(m.c);
           const edgeVp = toVp({ x: m.c.x + m.r, y: m.c.y });
           const rVp = Math.abs(edgeVp.x - cVp.x);
+
           return (
-            <g key={m.id}>
+            <g key={m.id} data-mark="1" data-mark-id={m.id}>
               <circle cx={cVp.x} cy={cVp.y} r={rVp} fill={fill} stroke={stroke} strokeWidth={sw} />
               {isSel && drawCenterLabel(m)}
+              {isSel && (
+                <>
+                  <circle cx={cVp.x} cy={cVp.y} r={HANDLE_R} fill="#f59e0b" data-handle="1" />
+                  <circle cx={edgeVp.x} cy={edgeVp.y} r={HANDLE_R} fill="#f59e0b" data-handle="1" />
+                </>
+              )}
             </g>
           );
         }
@@ -575,20 +740,90 @@ export default function SvgOverlay({ viewport, page, containerRef, markState, di
         />
       )}
 
-      {draft?.kind === "circle" && draft.c && typeof draft.r === "number" && draft.r > 0 && (() => {
-        const cVp = toVp(draft.c);
-        const edgeVp = toVp({ x: draft.c.x + draft.r, y: draft.c.y });
-        const rVp = Math.abs(edgeVp.x - cVp.x);
-        return (
-          <circle cx={cVp.x} cy={cVp.y} r={rVp} fill="rgba(34,197,94,0.12)" stroke="#22c55e" strokeWidth={2} />
-        );
-      })()}
+      {draft?.kind === "circle" && draft.c && typeof draft.r === "number" && draft.r > 0 &&
+        (() => {
+          const cVp = toVp(draft.c);
+          const edgeVp = toVp({ x: draft.c.x + draft.r!, y: draft.c.y });
+          const rVp = Math.abs(edgeVp.x - cVp.x);
+          return <circle cx={cVp.x} cy={cVp.y} r={rVp} fill="rgba(34,197,94,0.12)" stroke="#22c55e" strokeWidth={2} />;
+        })()}
+
+      {/* ✅ Text draft inline editor */}
+      {textDraft?.p &&
+        (() => {
+          const vp = toVp(textDraft.p);
+          const value = textDraft.text ?? "";
+          const size = textDraft.fontSize ?? 14;
+
+          return (
+            <foreignObject x={vp.x} y={vp.y - size - 12} width={320} height={90}>
+  <div
+    style={{
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      padding: 8,
+      borderRadius: 12,
+      border: "1px solid rgba(0,0,0,0.15)",
+      background: "rgba(255,255,255,0.95)",
+      backdropFilter: "blur(6px)",
+      width: 300,
+    }}
+    onMouseDown={(e) => e.stopPropagation()}
+    onClick={(e) => e.stopPropagation()}
+  >
+
+                <input
+                  autoFocus
+                  value={value}
+                  placeholder="Type text… (Enter to place)"
+                  onChange={(e) =>
+                    dispatch({ type: "UPDATE_DRAFT", draft: { ...textDraft, text: e.target.value } })
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") dispatch({ type: "CANCEL_DRAFT" });
+                    if (e.key === "Enter") dispatch({ type: "COMMIT_DRAFT" });
+                    e.stopPropagation();
+                  }}
+                  style={{
+                    width: "100%",
+                    fontSize: `${size}px`,
+                    padding: "8px 10px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(0,0,0,0.18)",
+                    outline: "none",
+                  }}
+                />
+
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <input
+                    type="range"
+                    min={8}
+                    max={72}
+                    value={size}
+                    onChange={(e) =>
+                      dispatch({ type: "UPDATE_DRAFT", draft: { ...textDraft, fontSize: Number(e.target.value) } })
+                    }
+                    style={{ flex: 1 }}
+                  />
+                  <div style={{ width: 44, textAlign: "right", fontSize: 12, opacity: 0.7 }}>
+                    {size}px
+                  </div>
+                </div>
+
+                <div style={{ fontSize: 11, opacity: 0.6 }}>
+                  Enter = place • Esc = cancel
+                </div>
+              </div>
+            </foreignObject>
+          );
+        })()}
 
       {/* Scale preview */}
       {draft?.kind === "scale" && (
         <>
-          {draft.a && <circle cx={toVp(draft.a).x} cy={toVp(draft.a).y} r={5} fill="#f59e0b" />}
-          {draft.b && <circle cx={toVp(draft.b).x} cy={toVp(draft.b).y} r={5} fill="#f59e0b" />}
+          {draft.a && <circle cx={toVp(draft.a).x} cy={toVp(draft.a).y} r={HANDLE_R} fill="#f59e0b" />}
+          {draft.b && <circle cx={toVp(draft.b).x} cy={toVp(draft.b).y} r={HANDLE_R} fill="#f59e0b" />}
 
           {draft.a && !draft.b && hoverPdf && (
             <path

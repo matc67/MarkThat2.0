@@ -275,20 +275,27 @@ function reducePresent(state: MarkState, action: MarkAction): MarkState {
       }
 
       if (d.kind === "text" && d.p) {
-        const mark = withDefaults<TextMark>(
-          {
-            id: uid(),
-            page,
-            kind: "text",
-            p: d.p,
-            text: "Text",
-            fontSize: 14,
-          } as TextMark,
-          state.defaultStyle
-        );
+  const raw = (d.text ?? "").trim();
+  if (!raw) {
+    // don't place empty text
+    return { ...state, draft: null, live: null };
+  }
 
-        return { ...state, marks: [...state.marks, mark], draft: null, live: null, selectedId: mark.id };
-      }
+  const mark = withDefaults<TextMark>(
+    {
+      id: uid(),
+      page,
+      kind: "text",
+      p: d.p,
+      text: raw,
+      fontSize: d.fontSize ?? 14,
+    } as TextMark,
+    state.defaultStyle
+  );
+
+  return { ...state, marks: [...state.marks, mark], draft: null, live: null, selectedId: mark.id };
+}
+
 
       return state;
     }
