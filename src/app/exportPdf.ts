@@ -79,12 +79,49 @@ function drawPolyline(
   }
 }
 
-function polygonToSvgPath(pts: PdfPoint[]) {
-  if (pts.length < 2) return "";
-  let d = `M ${pts[0].x} ${pts[0].y}`;
-  for (let i = 1; i < pts.length; i++) d += ` L ${pts[i].x} ${pts[i].y}`;
-  d += " Z";
-  return d;
+/**
+ * Reliable polygon fill:
+ * Many PDF-lib builds behave inconsistently with drawSvgPath fills.
+ * Triangle-fan fill (N-2 triangles) is extremely reliable.
+ */
+function fillPolygonTriangleFan(
+  page: any,
+  pts: PdfPoint[],
+  opts: { color: any; opacity: number }
+) {
+  if (pts.length < 3) return;
+  const anyPage = page as any;
+
+  const p0 = pts[0];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const tri = [
+      { x: p0.x, y: p0.y },
+      { x: pts[i].x, y: pts[i].y },
+      { x: pts[i + 1].x, y: pts[i + 1].y },
+    ];
+
+    if (typeof anyPage.drawPolygon === "function") {
+      // Try with opacity first (supported in many setups),
+      // fallback without opacity if the library rejects it.
+      try {
+        anyPage.drawPolygon(tri, {
+          color: opts.color,
+          opacity: clamp01(opts.opacity),
+          borderWidth: 0,
+        });
+      } catch {
+        anyPage.drawPolygon(tri, {
+          color: opts.color,
+          borderWidth: 0,
+        });
+      }
+    } else {
+      // If drawPolygon isn't available, we can't safely fill.
+      // (This is extremely rare in pdf-lib page API)
+      // We intentionally do nothing here rather than risk a broken export.
+      // Outline will still export.
+    }
+  }
 }
 
 export async function exportPdfWithMarks(args: {
@@ -117,22 +154,16 @@ export async function exportPdfWithMarks(args: {
       // ---- fill ----
       const fillParsed = parseCssColor(m.style?.fill);
 
-      // If fill is explicitly none/transparent -> NO FILL
       const fillIsNone = fillParsed.none || fillParsed.opacity <= 0;
 
-      // If a real fill color is provided, use it. Otherwise (only for shapes) default to stroke tint.
-      const fillColor =
-        fillIsNone
-          ? null
-          : fillParsed.color ?? strokeColor;
+      const fillColor = fillIsNone ? null : fillParsed.color ?? strokeColor;
 
-      const fillOpacity =
-        fillIsNone
-          ? 0
-          : clamp01(
-              fillParsed.opacity ??
-                (m.kind === "rect" || m.kind === "circle" || m.kind === "polygon" ? defaultFillOpacity : 0)
-            );
+      const fillOpacity = fillIsNone
+        ? 0
+        : clamp01(
+            fillParsed.opacity ??
+              (m.kind === "rect" || m.kind === "circle" || m.kind === "polygon" ? defaultFillOpacity : 0)
+          );
 
       // ---- draw ----
       if (m.kind === "line") {
@@ -146,20 +177,19 @@ export async function exportPdfWithMarks(args: {
         continue;
       }
 
-      // ✅ Polygon: fill (svg path) + stroke (lines)
+      // ✅ Polygon: fill via triangle fan + stroke outline
       if (m.kind === "polygon") {
         if (m.points.length < 2) continue;
 
-        // FILL FIRST so outline sits on top
+        // Fill first
         if (m.points.length >= 3 && fillColor && fillOpacity > 0) {
-          const d = polygonToSvgPath(m.points);
-          (page as any).drawSvgPath(d, {
+          fillPolygonTriangleFan(page, m.points, {
             color: fillColor,
             opacity: clamp01(fillOpacity),
           });
         }
 
-        // STROKE outline
+        // Outline second
         if (strokeOpacity > 0) {
           drawPolyline(page, m.points, {
             color: strokeColor,

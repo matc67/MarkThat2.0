@@ -34,6 +34,9 @@ export default function PdfViewer({
   const pdfCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
 
+  // ✅ NEW: ref to the page wrapper (the element that contains canvas + overlay)
+  const pageWrapRef = useRef<HTMLDivElement | null>(null);
+
   const [doc, setDoc] = useState<PdfDoc | null>(null);
   const [viewport, setViewport] = useState<PageViewport | null>(null);
 
@@ -42,33 +45,69 @@ export default function PdfViewer({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code === "Space") {
-        // prevent page scroll while holding space
         e.preventDefault();
         spaceDownRef.current = true;
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code === "Space") {
-        spaceDownRef.current = false;
-      }
+      if (e.code === "Space") spaceDownRef.current = false;
     };
 
     window.addEventListener("keydown", onKeyDown, { passive: false });
     window.addEventListener("keyup", onKeyUp);
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("keydown", onKeyDown as any);
+      window.removeEventListener("keyup", onKeyUp as any);
     };
   }, []);
 
-  // --- Ctrl + scroll / pinch zoom ---
+  // ---------------------------
+  // ZOOM AROUND MOUSE
+  // - Capture mouse position relative to pageWrap (localX/localY)
+  // - After re-render, restore scroll so that same content point is under mouse
+  // ---------------------------
+  const pendingZoomAnchorRef = useRef<null | {
+    mx: number; // mouse x in scroller viewport coords
+    my: number; // mouse y in scroller viewport coords
+    localX: number; // mouse x in pageWrap coords (old zoom pixels)
+    localY: number; // mouse y in pageWrap coords (old zoom pixels)
+    oldZoom: number;
+    scrollLeft: number;
+    scrollTop: number;
+  }>(null);
+
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
+    const scroller = scrollRef.current;
+    if (!scroller) return;
 
     function onWheel(e: WheelEvent) {
       if (!e.ctrlKey) return;
       e.preventDefault();
+
+      const scrollerEl = scrollRef.current;
+      const wrap = pageWrapRef.current;
+      if (!scrollerEl || !wrap) return;
+
+      const scRect = scrollerEl.getBoundingClientRect();
+      const wrapRect = wrap.getBoundingClientRect();
+
+      // mouse in scroller viewport coords
+      const mx = e.clientX - scRect.left;
+      const my = e.clientY - scRect.top;
+
+      // mouse in pageWrap coords (old zoom pixels)
+      const localX = e.clientX - wrapRect.left;
+      const localY = e.clientY - wrapRect.top;
+
+      pendingZoomAnchorRef.current = {
+        mx,
+        my,
+        localX,
+        localY,
+        oldZoom: zoom,
+        scrollLeft: scrollerEl.scrollLeft,
+        scrollTop: scrollerEl.scrollTop,
+      };
 
       const direction = e.deltaY > 0 ? -1 : 1;
       const step = 0.1;
@@ -76,8 +115,8 @@ export default function PdfViewer({
       onRequestZoom(next);
     }
 
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
+    scroller.addEventListener("wheel", onWheel, { passive: false });
+    return () => scroller.removeEventListener("wheel", onWheel as any);
   }, [zoom, onRequestZoom]);
 
   // --- Load PDF when file changes ---
@@ -136,6 +175,40 @@ export default function PdfViewer({
 
       const task = pageObj.render({ canvasContext: ctx, viewport: vp, canvas });
       await task.promise;
+
+      // ✅ Apply "zoom around mouse" after sizes update
+      const scroller = scrollRef.current;
+      const wrap = pageWrapRef.current;
+      const anchor = pendingZoomAnchorRef.current;
+
+      if (!scroller || !wrap || !anchor) return;
+
+      const ratio = zoom / anchor.oldZoom;
+      if (!Number.isFinite(ratio) || ratio <= 0) {
+        pendingZoomAnchorRef.current = null;
+        return;
+      }
+
+      // We want: (content point under mouse) stays constant after zoom.
+      // contentX = scrollLeft + mx
+      // That content point corresponds to: wrapOffsetX + localX
+      // After zoom: localX becomes localX * ratio
+      // So set scrollLeft' = (wrapOffsetX + localX*ratio) - mx
+
+      const scRect = scroller.getBoundingClientRect();
+      const wrapRect = wrap.getBoundingClientRect();
+
+      // wrap offset in scroller-content coords (using the OLD scroll position we stored)
+      const wrapOffsetX = anchor.scrollLeft + (wrapRect.left - scRect.left);
+      const wrapOffsetY = anchor.scrollTop + (wrapRect.top - scRect.top);
+
+      const targetScrollLeft = wrapOffsetX + anchor.localX * ratio - anchor.mx;
+      const targetScrollTop = wrapOffsetY + anchor.localY * ratio - anchor.my;
+
+      scroller.scrollLeft = targetScrollLeft;
+      scroller.scrollTop = targetScrollTop;
+
+      pendingZoomAnchorRef.current = null;
     }
 
     render().catch(console.error);
@@ -147,8 +220,8 @@ export default function PdfViewer({
   // ---------------------------
   // PANNING (Option A)
   // - Select: drag empty space pans
-  // - Edit: drag object moves (overlay); drag empty can pan (nice)
-  // - Space + drag anywhere pans (overrides everything)
+  // - Edit: drag object moves; drag empty can pan
+  // - Space + drag anywhere pans
   // ---------------------------
   const panRef = useRef<{
     active: boolean;
@@ -173,7 +246,6 @@ export default function PdfViewer({
   function isOnMark(target: EventTarget | null) {
     const el = target as Element | null;
     if (!el) return false;
-    // SvgOverlay marks have <g data-mark="1">
     return !!el.closest?.("[data-mark='1']");
   }
 
@@ -191,21 +263,14 @@ export default function PdfViewer({
   }
 
   function activatePanIfNeeded(e: React.PointerEvent) {
-    const scroller = scrollRef.current;
-    if (!scroller) return;
     const pr = panRef.current;
     if (!pr.candidate || pr.active) return;
 
     const dx = e.clientX - pr.startX;
     const dy = e.clientY - pr.startY;
-    const dist = Math.hypot(dx, dy);
-
-    // small threshold so clicks still work
-    if (dist < 3) return;
+    if (Math.hypot(dx, dy) < 3) return;
 
     pr.active = true;
-
-    // capture pointer so we keep receiving move events
     try {
       (e.currentTarget as Element).setPointerCapture(e.pointerId);
     } catch {
@@ -231,13 +296,11 @@ export default function PdfViewer({
 
   function endPan(e: React.PointerEvent) {
     const pr = panRef.current;
-
     if (pr.pointerId === e.pointerId) {
       pr.active = false;
       pr.candidate = false;
       pr.pointerId = null;
     }
-
     try {
       (e.currentTarget as Element).releasePointerCapture(e.pointerId);
     } catch {
@@ -245,12 +308,10 @@ export default function PdfViewer({
     }
   }
 
-  // Capture-phase handlers so Space-pan can override overlay move
   function onPointerDownCapture(e: React.PointerEvent) {
-    if (e.button !== 0) return; // left button only
+    if (e.button !== 0) return;
     const tool = markState.tool;
 
-    // Space always pans, any tool (but you can restrict if you want)
     if (spaceDownRef.current) {
       beginCandidatePan(e);
       e.preventDefault();
@@ -258,19 +319,16 @@ export default function PdfViewer({
       return;
     }
 
-    // Only allow drag-pan in select/edit (Option A)
     if (!panTools.has(tool)) return;
 
     const startedOnMark = isOnMark(e.target);
 
-    // Select: pan only if NOT starting on an object
     if (tool === "select") {
       if (startedOnMark) return;
       beginCandidatePan(e);
       return;
     }
 
-    // Edit: let object-drag move objects; pan only if empty space
     if (tool === "edit") {
       if (startedOnMark) return;
       beginCandidatePan(e);
@@ -282,7 +340,6 @@ export default function PdfViewer({
     activatePanIfNeeded(e);
     applyPan(e);
 
-    // if we are panning via space, keep overlay from doing anything
     if (panRef.current.active && spaceDownRef.current) {
       e.preventDefault();
       e.stopPropagation();
@@ -297,11 +354,8 @@ export default function PdfViewer({
     endPan(e);
   }
 
-  // Cursor hint: space = grab
   const cursorStyle = useMemo(() => {
     if (spaceDownRef.current) return "grab";
-    if (markState.tool === "edit") return "default";
-    if (markState.tool === "select") return "default";
     return "default";
   }, [markState.tool]);
 
@@ -318,9 +372,9 @@ export default function PdfViewer({
         <div className="dropHint">Open a PDF using the button above or drag/drop into the viewer area.</div>
       ) : (
         <div style={{ padding: 18 }}>
-          <div style={{ position: "relative", display: "inline-block" }}>
+          {/* ✅ NEW: attach pageWrapRef here */}
+          <div ref={pageWrapRef} style={{ position: "relative", display: "inline-block" }}>
             <canvas ref={pdfCanvasRef} />
-
             <div ref={overlayRef} style={{ position: "absolute", left: 0, top: 0 }}>
               <SvgOverlay
                 viewport={viewport}
